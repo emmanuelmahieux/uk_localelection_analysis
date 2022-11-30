@@ -1,0 +1,142 @@
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+
+#load 2022 local elections data
+#download excel spreadsheet from https://commonslibrary.parliament.uk/research-briefings/cbp-9545/
+local_election_data = read_excel('../Data/CBP9545-detailed-results-for-download.xlsx')
+
+#use first row as column names
+colnames(local_election_data) = local_election_data[1,]
+
+local_election_data = local_election_data[-1,]
+
+#rename column for OA codes 
+names(local_election_data)[names(local_election_data)=='ons code'] = 'output_area_code'
+
+#keep only columns of interest
+local_election_data = local_election_data[,c(1,2,6,7,22,23,24,25,26,27)]
+
+
+#load council-level census data
+#the data can be found at 
+#https://www.ons.gov.uk/peoplepopulationandcommunity/populationandmigration/populationestimates/articles/demographyandmigrationdatacontent/2022-11-02
+#by clicking the download link "Households by deprivation dimensions (England and Wales): TS011"
+council_level_census = read_excel('../Data/council_level_deprivation_data_2.xlsx', sheet = 2)
+
+#rename column for OA codes
+names(council_level_census)[names(council_level_census)=='Lower Tier Local Authorities Code'] = 'output_area_code'
+
+
+#-------------------------------------------------------------------------------------------
+
+
+#create an index of deprivation
+
+#The current census measures deprivation on 4 dimensions: education, employment, health and housing.
+#Deprived households are classified as deprived on one, two, three or all of these dimensions as counts
+#in separate columns. It is more useful to have a single column with an aggregated index of deprivation
+#in order to see if greater deprivation is more associated with Labour or Conservative voting.
+
+#make council name column a factor 
+council_level_census$`Lower Tier Local Authorities Label` = factor(council_level_census$`Lower Tier Local Authorities Label`)
+
+#get total number of households in each council
+new_df = aggregate(council_level_census$Count, 
+                   by= list(Group=council_level_census$`Lower Tier Local Authorities Label`),
+                   FUN = sum)
+
+names(new_df)[names(new_df)=='Group'] = 'Lower Tier Local Authorities Label'
+names(new_df)[names(new_df)=='x'] = 'n_households_in_council'
+
+council_level_census = merge(new_df, council_level_census, 
+                             by = 'Lower Tier Local Authorities Label')
+
+#divide each of the counts for each level of deprivation by the total number of households. 
+#This will give you the percentage of deprived households for each council
+
+council_level_census$percentage_deprived = council_level_census$Count/council_level_census$n_households_in_council
+
+council_level_census$`Household deprivation (6 categories) Code` = as.numeric(council_level_census$`Household deprivation (6 categories) Code`)
+
+#multiply the percentages by the relative weights in the Household Deprivation Code column so that households deprived
+#on multiple dimensions have a greater weight than those deprived on fewer dimensions
+
+council_level_census$deprivation_product = council_level_census$percentage_deprived * council_level_census$`Household deprivation (6 categories) Code`
+
+#sum the resulting values
+
+new_df_2 = aggregate(council_level_census$deprivation_product, 
+                     by= list(Group=council_level_census$`Lower Tier Local Authorities Label`),
+                     FUN = sum)
+
+names(new_df_2)[names(new_df_2)=='Group'] = 'Lower Tier Local Authorities Label'
+names(new_df_2)[names(new_df_2)=='x'] = 'deprivation_index'
+
+#this sum is the deprivation index for each council
+
+council_level_census = merge(new_df_2, council_level_census, 
+                             by = 'Lower Tier Local Authorities Label')
+
+#merge local election results df with census data
+merged_census_and_electoral_data = merge(local_election_data, council_level_census, by = 'output_area_code')
+
+#keep only columns of interest
+merged_census_and_electoral_data = merged_census_and_electoral_data[,c(1,2,3,4,5,6,7,8,9,10,12)]
+
+#eliminate duplicate rows
+merged_census_and_electoral_data = merged_census_and_electoral_data %>% distinct(`council name`, .keep_all = TRUE)
+
+#convert electoral result columns from character to numeric
+
+merged_census_and_electoral_data$LAB = as.numeric(merged_census_and_electoral_data$LAB)
+merged_census_and_electoral_data$CON = as.numeric(merged_census_and_electoral_data$CON)
+merged_census_and_electoral_data$LD = as.numeric(merged_census_and_electoral_data$LD)
+merged_census_and_electoral_data$GRN = as.numeric(merged_census_and_electoral_data$GRN)
+merged_census_and_electoral_data$OTH = as.numeric(merged_census_and_electoral_data$OTH)
+
+
+#subset df to have councils that the Conservatives lost
+#Somerset not here because it's broken down into smaller subdivisions
+
+councils_CON_lost = subset(merged_census_and_electoral_data, 
+                           merged_census_and_electoral_data$`council name`== 'Wandsworth'|
+                             merged_census_and_electoral_data$`council name`== 'Westminster' | 
+                             merged_census_and_electoral_data$`council name`== 'Southampton'|
+                             merged_census_and_electoral_data$`council name`== 'Maidstone'|
+                             merged_census_and_electoral_data$`council name`== 'Wokingham'|
+                             merged_census_and_electoral_data$`council name`== 'Huntingdonshire'|
+                             merged_census_and_electoral_data$`council name`== 'Barnet'|
+                             merged_census_and_electoral_data$`council name`== 'Kirklees'|
+                             merged_census_and_electoral_data$`council name`== 'Rossendale'|
+                             merged_census_and_electoral_data$`council name`== 'Crawley'|
+                             merged_census_and_electoral_data$`council name`== 'Worthing'|
+                             merged_census_and_electoral_data$`council name`== 'Woking')
+
+conservative_councils = subset(merged_census_and_electoral_data,
+                        merged_census_and_electoral_data$Control =='CON')
+
+#linear regression models
+#does deprivation explain swings to Labour?
+deprivation_and_LAB_vote = lm(LAB~deprivation_index,merged_census_and_electoral_data)
+summary(deprivation_and_LAB_vote)
+
+#does deprivation explain swings to the Conservatives?
+deprivation_and_CON_vote = lm(CON~deprivation_index,merged_census_and_electoral_data)
+summary(deprivation_and_CON_vote)
+
+#does deprivation explain swings to the Libdems?
+deprivation_and_LD_vote = lm(LD~deprivation_index,merged_census_and_electoral_data)
+summary(deprivation_and_LD_vote)
+
+#plot the variables as a sanity check
+ggplot(merged_census_and_electoral_data, aes(deprivation_index,CON))+
+  geom_point() +
+  geom_smooth(method='lm')+
+  theme_classic()+
+  xlab("Deprivation index") + 
+  ylab("Council seats gained by the Conservatives")
+
+
